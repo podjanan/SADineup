@@ -168,4 +168,76 @@ router.patch("/:id/cancel", authRequired, async (req, res) => {
   }
 });
 
+router.post("/forgot", async (req, res) => {
+  try {
+    const { email } = req.body || {};
+    if (!email) return res.status(400).json({ message: "กรุณาระบุอีเมล" });
+
+    const [[user]] = await pool.query("SELECT user_id, email, name FROM users WHERE email=?", [email]);
+    // เพื่อความปลอดภัย ตอบ success แม้ไม่พบ user (กันไล่เดาอีเมล)
+    if (!user) {
+      return res.json({ message: "หากอีเมลนี้อยู่ในระบบ เราได้ส่งลิงก์รีเซ็ตให้แล้ว" });
+    }
+
+    const token = crypto.randomBytes(32).toString("hex");
+    const expires = new Date(Date.now() + 60 * 60 * 1000); // 1 ชั่วโมง
+
+    await pool.query(
+      "UPDATE users SET reset_token=?, reset_expires=? WHERE user_id=?",
+      [token, expires, user.user_id]
+    );
+
+    const resetUrl = `${process.env.FRONTEND_URL || "http://localhost:5173"}/reset?token=${token}`;
+
+    await transporter.sendMail({
+      from: process.env.MAIL_FROM || '"DineUp" <no-reply@dineup.local>',
+      to: user.email,
+      subject: "รีเซ็ตรหัสผ่าน DineUp",
+      html: `
+        <p>สวัสดี ${user.name || ""},</p>
+        <p>คุณแจ้งลืมรหัสผ่าน โปรดกดลิงก์ด้านล่างเพื่อรีเซ็ตรหัสผ่าน (ภายใน 1 ชั่วโมง)</p>
+        <p><a href="${resetUrl}" target="_blank">${resetUrl}</a></p>
+        <p>หากไม่ได้ร้องขอ ให้เมินอีเมลนี้</p>
+      `,
+    });
+
+    return res.json({ message: "ส่งอีเมลรีเซ็ตรหัสผ่านแล้ว" });
+  } catch (err) {
+    console.error("POST /api/auth/forgot error:", err);
+    return res.status(500).json({ message: "ไม่สามารถส่งอีเมลได้" });
+  }
+});
+
+// POST /api/auth/reset
+router.post("/reset", async (req, res) => {
+  try {
+    const { token, new_password } = req.body || {};
+    if (!token || !new_password) {
+      return res.status(400).json({ message: "ข้อมูลไม่ครบ" });
+    }
+
+    const [[user]] = await pool.query(
+      "SELECT user_id, reset_expires FROM users WHERE reset_token=?",
+      [token]
+    );
+    if (!user) return res.status(400).json({ message: "โทเคนไม่ถูกต้อง" });
+
+    if (!user.reset_expires || new Date(user.reset_expires).getTime() < Date.now()) {
+      return res.status(400).json({ message: "โทเคนหมดอายุแล้ว" });
+    }
+
+    const hash = await bcrypt.hash(new_password, 10);
+    await pool.query(
+      "UPDATE users SET password=?, reset_token=NULL, reset_expires=NULL WHERE user_id=?",
+      [hash, user.user_id]
+    );
+
+    return res.json({ message: "ตั้งรหัสผ่านใหม่สำเร็จ" });
+  } catch (err) {
+    console.error("POST /api/auth/reset error:", err);
+    return res.status(500).json({ message: "ไม่สามารถตั้งรหัสผ่านใหม่ได้" });
+  }
+});
+
+
 export default router;
